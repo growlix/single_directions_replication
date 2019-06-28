@@ -15,9 +15,8 @@ import matplotlib.pyplot as plt
 
 from single_directions_tools import mnist_mlp
 
-model_directory = './trained_models_and_shuffled_labels/'
+model_and_output_directory = './models_and_output/'
 training_data_directory = './training_data/'
-output_data_directory = './output_data/'
 device = 'cpu'
 
 # Fraction of data that will be used for testing. Use less to save on
@@ -28,12 +27,10 @@ data_fraction = .2
 # on time/computation. Default step size is 1.
 ablation_steps = 20
 # Run the analysis
-ablation_data = mnist_mlp.run_analyses(model_directory=model_directory,
-                       training_data_directory=training_data_directory,
-                       output_data_directory=output_data_directory,
-                       device=device,
-                       data_fraction=data_fraction,
-                       ablation_steps=ablation_steps)
+ablation_data = mnist_mlp.run_analyses(
+    model_and_output_directory=model_and_output_directory,
+    training_data_directory=training_data_directory,device=device,
+    data_fraction=data_fraction, ablation_steps=ablation_steps)
 
 # Ablation analysis on MNIST data
 # ablate(mnist_generalization_models_path)
