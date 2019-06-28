@@ -45,8 +45,9 @@ class MLP(nn.Module):
             [0, 1], list(range(n_units_per_layer))))
         # Initialize list of units to ablate
         self.ablate(init=True)
-        # Define forward pass
+        # Initialize
 
+        # Define forward pass
     def forward(self, x):
         # Reshape input image into 1 x n row vector
         x = x.view(-1, self.input_size)
@@ -157,8 +158,9 @@ def test(model, data_loader, criterion, loss_vector, accuracy_vector,
 
 def ablation_test(model, data_loader, criterion, params_path,
                   ablation_data={}, device='cpu',
-                  n_repetitions=10, data_fraction=1, ablation_steps=None):
-    """Tests model as units are randomly ablated (zero'd)
+                  n_repetitions=10, data_fraction=1, ablation_type='zero',
+                  ablation_steps=None, noise_scale=[-1.5, 1]):
+    """Tests model as units are randomly ablated (zeroed out or noise added)
 
     Units are ablated in random order from a specified set of layers.
     Ablation is achieved by setting a unit's input weights and bias to zero.
@@ -186,11 +188,23 @@ def ablation_test(model, data_loader, criterion, params_path,
     data_fraction : float, (0, 1]
         Fraction of data that will be used for testing. Use less to save on
         time/computation. Default = 1.
+    ablation_type : string ('zero', 'noise')
+        The type of ablation to perform. 'zero' (default) will zero out
+        units. 'noise' will add noise, scaled by the empirical variance of
+        the units' activation across the training set.
     ablation_steps : int
-        If a unit has n ablatable units, units will be ablated in
-        ablation_steps evenly spaced steps over the interval 1 to n. Use a
-        smaller number to save on time/computation. Default step size is 1.
-
+        If ablation_type is 'zero': If a unit has n ablatable units,
+        units will be ablated in ablation_steps evenly spaced steps over
+        the interval 1 to n. Use a smaller number to save on
+        time/computation. Default step size is 1.
+        If ablation_type is 'noise': Noise with zero mean and progressively
+        increasing variance (scaled by the empirical variance of each
+        units' activations will be added in logarithmically-spaced increments.
+    noise_scale : list
+        interval over which noise will be scaled logarithmically. over
+        ablation_steps number of steps E.g. noise_scale = [-1.5, 1] and
+        ablation_steps = 10 will yield 10 logarithmically spaced steps from
+        10^-1.5 to 10^1. Default = [-1.5, 1].
     Returns
     -------
     ablation_data
@@ -200,6 +214,8 @@ def ablation_test(model, data_loader, criterion, params_path,
     loss_key = 'loss'
     accuracy_key = 'accuracy'
     n_units_ablated_key = 'units ablated'
+    if ablation_type.lower() == 'noise':
+        n_units_ablated_key = 'scale of per-unit noise'
     dropout_key = 'dropout fraction'
     rep_key = 'repetition'
     # Initialize ablation_data keys if it's empty
@@ -208,6 +224,7 @@ def ablation_test(model, data_loader, criterion, params_path,
                               n_units_ablated_key, dropout_key, rep_key]
         for key in ablation_data_keys:
             ablation_data[key] = []
+
     # Check if model_path is a directory. If so, loop through each model
     # file in the directory and call ablate() recursively.
     if os.path.isdir(params_path):
@@ -221,10 +238,11 @@ def ablation_test(model, data_loader, criterion, params_path,
                           model_name, ablation_data=ablation_data,
                           device=device, data_fraction=data_fraction,
                           n_repetitions=n_repetitions,
-                          ablation_steps=ablation_steps)
+                          ablation_steps=ablation_steps,
+                          ablation_type=ablation_type, noise_scale=noise_scale)
         ablation_data
     else:
-        # Path of directory containing data
+        # Path of directory containing saved model parameters
         params_directory_path = params_path[0: params_path.rfind('/') + 1]
         # Filename of current model parameters
         params_filename = params_path[params_path.rfind('/') + 1:]
@@ -237,55 +255,70 @@ def ablation_test(model, data_loader, criterion, params_path,
         data_loader.dataset.targets = torch.load(
             params_directory_path + shuffled_targets_filename)
         n_units = len(model.ablation_list)
-        if ablation_steps is None:
-            ablation_steps = n_units
-        # Ablation counts on which model should be tested
-        ablation_test_counts = np.linspace(0, n_units, ablation_steps).round()
+        # If ablating to zero
+        if ablation_type.lower() == 'zero':
+            if ablation_steps is None:
+                ablation_steps = n_units
+            # Ablation counts on which model should be tested
+            ablation_test_counts = np.linspace(0, n_units,
+                                               ablation_steps).round()
+        # If injecting noise
+        elif ablation_type.lower() == 'noise':
+            if ablation_steps is None:
+                ablation_steps = 20
+            ablation_test_counts = np.logspace(
+                noise_scale[0], noise_scale[1], ablation_steps)
         # Create values for ablation_curves
         shuffle_fraction = \
-            float(params_filename[params_filename.find('shuff') + 5 :
+            float(params_filename[params_filename.find('shuff') + 5:
                                   params_filename.find('shuff') + 8])
         dropout_fraction = \
-            float(params_filename[params_filename.find('dropout') + 7 :
+            float(params_filename[params_filename.find('dropout') + 7:
                                   params_filename.find('dropout') + 10])
         # Repeat ablation process for repetitions
         for rep_n in range(n_repetitions):
             # Load Model
             model.load_state_dict(torch.load(params_path, map_location=device))
-            # Flag to continue ablating
-            ablation_flag = True
-            # Count of units ablated
-            n_units_ablated = 0
             print('Repetition ' + str(rep_n + 1) + ' out of ' + str(
                 n_repetitions))
-            # Test, ablate, repeat
-            while ablation_flag:
-                if n_units_ablated in ablation_test_counts:
-                    loss, accuracy = [], []
-                    print('Ablated ' + str(n_units_ablated) + ' units of ' +
-                          str(n_units))
-                    # Test
-                    test(model, data_loader, criterion, loss,
-                         accuracy, data_fraction=data_fraction,
-                         device=device)
-                    # Add values to ablation_data
-                    ablation_data[shuff_key].append(
-                        shuffle_fraction)
-                    ablation_data[loss_key].append(loss[0])
-                    ablation_data[accuracy_key].append(accuracy[0].item())
-                    ablation_data[n_units_ablated_key].append(n_units_ablated)
-                    ablation_data[dropout_key].append(dropout_fraction)
-                    ablation_data[rep_key].append(rep_n)
-                # Ablate and set flag
-                ablation_flag = model.ablate()
-                # Increment ablation counter
-                n_units_ablated += 1
+            # If we are zeroing
+            if ablation_type.lower() == 'zero':
+                # Flag to continue ablating
+                ablation_flag = True
+                # Count of units ablated
+                n_units_ablated = 0
+                # Test, ablate, repeat
+                while ablation_flag:
+                    if n_units_ablated in ablation_test_counts:
+                        loss, accuracy = [], []
+                        print('Ablated ' + str(n_units_ablated) + ' units of ' +
+                              str(n_units))
+                        # Test
+                        test(model, data_loader, criterion, loss,
+                             accuracy, data_fraction=data_fraction,
+                            device=device)
+                        # Add values to ablation_data
+                        ablation_data[shuff_key].append(
+                            shuffle_fraction)
+                        ablation_data[loss_key].append(loss[0])
+                        ablation_data[accuracy_key].append(accuracy[0].item())
+                        ablation_data[n_units_ablated_key].append(n_units_ablated)
+                        ablation_data[dropout_key].append(dropout_fraction)
+                        ablation_data[rep_key].append(rep_n)
+                    # Ablate and set flag
+                    ablation_flag = model.ablate()
+                    # Increment ablation counter
+                    n_units_ablated += 1
+            # If injecting noise
+            elif ablation_type.lower() == 'noise':
+                # Compute (or load) activations of every unit for every example
+                ablation_type
+                # Loop through ablation_test_counts, adding scaled noise
     return ablation_data
 
 def run_analyses(
-        model_directory='./trained_models/',
+        model_and_output_directory='./models_and_output/',
         training_data_directory='./data',
-        output_data_directory = './output_data/',
         device='cpu',
         data_fraction=1,
         ablation_steps=None):
@@ -293,12 +326,11 @@ def run_analyses(
 
     Parameters
     ----------
-    model_directory : str
-        Path to base directory that contains models
+    model_and_output_directory : str
+        Path to base directory that contains models and stores data from
+        analyses
     training_data_directory : str
         Path to base directory that contains data sets (e.g. MNIST)
-    output_data_directory : str
-        Path to directory that where analysis data sets will be saved
     device : str
         Device that models will be deployed to (cpu, gpu, etc)
     data_fraction : float, (0, 1]
@@ -315,7 +347,7 @@ def run_analyses(
         Contains results from ablation analysis
     """
 
-    mlp_models_and_labels_path = model_directory + 'mnist_mlp/'
+    mlp_data_path = model_and_output_directory + 'mnist_mlp/'
 
     # MLP Parameters
     input_size = 28 * 28
@@ -346,9 +378,11 @@ def run_analyses(
     mnist_test_loader = torch.utils.data.DataLoader(
         dataset=mnist_test_data, shuffle=True)
 
+    # Compute activations for each example
+
     # Generalization analysis
     mlp = MLP(input_size, n_units_per_layer['generalization'], output_size)
-    mlp_generalization_model_params_path = mlp_models_and_labels_path \
+    mlp_generalization_path = mlp_data_path \
                                            + 'generalization/'
     ablation_layers = [
         ['linears.0.weight', 'linears.0.bias'],
@@ -357,15 +391,18 @@ def run_analyses(
 
     ablation_data = ablation_test(
         mlp, mnist_train_loader, criterion,
-        mlp_generalization_model_params_path, device=device,
+        mlp_generalization_path, device=device,
         data_fraction=data_fraction, ablation_steps=ablation_steps,
         n_repetitions=10)
     ablation_data = pd.DataFrame(ablation_data)
-    data_save_path = output_data_directory + 'generalization_MNIST.pkl'
+    data_save_path = model_and_output_directory + \
+                     'mnist_mlp_generalization_ablation.pkl'
     ablation_data.to_pickle(data_save_path)
 
-    sns.set()
-    plt.figure()
-    sns.lineplot(x='units ablated', y='accuracy',
-                 hue='fraction of labels corrupted', data=ablation_data,
-                 palette=sns.color_palette('Blues_d'))
+    # sns.set()
+    # plt.figure()
+    # sns.lineplot(x='units ablated', y='accuracy',
+    #              hue='fraction of labels corrupted', data=ablation_data,
+    #              palette=sns.color_palette('Blues_d'))
+
+
