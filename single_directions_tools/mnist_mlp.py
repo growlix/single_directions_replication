@@ -45,15 +45,38 @@ class MLP(nn.Module):
             [0, 1], list(range(n_units_per_layer))))
         # Initialize list of units to ablate
         self.ablate(init=True)
-        # Initialize
+        # Stores activations
+        self.activations = [[],[]]
+        # Flag to store activations
+        self.store_activations = False
+        # Holds standard deviations of activations across entire training
+        # set for each unit. Used when injecting noise. Each entry is an n
+        # x 1 list of variances, in which n = number of units.
+        self.sd = []
+        # Scales noise injection
+        self.sd_scale = 0
 
         # Define forward pass
     def forward(self, x):
         # Reshape input image into 1 x n row vector
         x = x.view(-1, self.input_size)
+        # First layer
         # Rectified linear unit (ReLU) activation
         x = F.relu(self.linears[0](x))
+        # If injecting noise
+        if self.sd_scale:
+            x = x + torch.from_numpy(np.random.normal(0, self.sd[0]) * \
+                self.sd_scale).float()
+        # If saving activations
+        if self.store_activations:
+            self.activations[0].append(x.squeeze().tolist())
+        # Second layer
         x = F.relu(self.linears[1](x))
+        if self.sd_scale:
+            x = x + torch.from_numpy(np.random.normal(0, self.sd[1]) * \
+                self.sd_scale).float()
+        if self.store_activations:
+            self.activations[1].append(x.squeeze().tolist())
         # Softmax on output layer
         return F.log_softmax(self.linears[2](x), dim=1)
 
@@ -312,7 +335,32 @@ def ablation_test(model, data_loader, criterion, params_path,
             # If injecting noise
             elif ablation_type.lower() == 'noise':
                 # Compute (or load) activations of every unit for every example
-                ablation_type
+                # Find file containing standard deviations of each unit's
+                # activation across the training data. If file doesn't
+                # exist, obtain data and create it.
+                unit_data_filename = \
+                    params_filename[0: params_filename.find('epochs')]
+                activation_data_path = params_directory_path + \
+                                    unit_data_filename + 'activations.pt'
+                unit_sd_data_path = params_directory_path + \
+                                    unit_data_filename + 'std.pt'
+                if os.path.exists(unit_sd_data_path):
+                    model.sd = torch.load(unit_sd_data_path)
+                else:
+                    loss, accuracy = [], []
+                    model.store_activations = True
+                    # Test on full training data
+                    test(model, data_loader, criterion, loss, accuracy,
+                         device=device)
+                    # Convert activation data to tensor
+                    model.activations = torch.tensor(model.activations)
+                    # Save activation data
+                    torch.save(model.activations, activation_data_path)
+                    # Compute standard deviations
+                    model.std = model.activations.std(1)
+                    # Save standard deviations of activations
+                    torch.save(model.sd, unit_sd_data_path)
+
                 # Loop through ablation_test_counts, adding scaled noise
     return ablation_data
 
@@ -389,16 +437,25 @@ def run_analyses(
         ['linears.1.weight', 'linears.1.bias']
     ]
 
+    # ablation_data = ablation_test(
+    #     mlp, mnist_train_loader, criterion,
+    #     mlp_generalization_path, device=device,
+    #     data_fraction=data_fraction, ablation_steps=ablation_steps,
+    #     n_repetitions=10)
+    # ablation_data = pd.DataFrame(ablation_data)
+    # data_save_path = model_and_output_directory + \
+    #                  'mnist_mlp_generalization_ablation.pkl'
+    # ablation_data.to_pickle(data_save_path)
+
     ablation_data = ablation_test(
         mlp, mnist_train_loader, criterion,
         mlp_generalization_path, device=device,
         data_fraction=data_fraction, ablation_steps=ablation_steps,
-        n_repetitions=10)
+        n_repetitions=10, ablation_type='noise')
     ablation_data = pd.DataFrame(ablation_data)
     data_save_path = model_and_output_directory + \
-                     'mnist_mlp_generalization_ablation.pkl'
+                     'mnist_mlp_generalization_noise.pkl'
     ablation_data.to_pickle(data_save_path)
-
     # sns.set()
     # plt.figure()
     # sns.lineplot(x='units ablated', y='accuracy',
