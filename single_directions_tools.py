@@ -1,6 +1,7 @@
 import os
 import itertools
 import time
+import warnings
 
 import torch
 import torch.nn as nn
@@ -46,7 +47,7 @@ class MLP(nn.Module):
         # Initialize list of units to ablate
         self.ablate(init=True)
         # Stores activations
-        self.activations = [[],[]]
+        self.activations = [[], []]
         # Flag to store activations
         self.store_activations = False
         # Holds standard deviations of activations across entire training
@@ -65,16 +66,16 @@ class MLP(nn.Module):
         x = F.relu(self.linears[0](x))
         # If injecting noise
         if self.sd_scale:
-            x = x + torch.from_numpy(np.random.normal(0, self.sd[0]) * \
-                self.sd_scale).float()
+            x = x + torch.from_numpy(np.random.normal(0, self.sd[0])).float() \
+                * self.sd_scale
         # If saving activations
         if self.store_activations:
             self.activations[0].append(x.squeeze().tolist())
         # Second layer
         x = F.relu(self.linears[1](x))
         if self.sd_scale:
-            x = x + torch.from_numpy(np.random.normal(0, self.sd[1]) * \
-                self.sd_scale).float()
+            x = x + torch.from_numpy(np.random.normal(0, self.sd[1])).float() \
+                * self.sd_scale
         if self.store_activations:
             self.activations[1].append(x.squeeze().tolist())
         # Softmax on output layer
@@ -197,9 +198,10 @@ def ablation_test(model, data_loader, criterion, params_path,
     criterion : loss function
         from torch.nn
     params_path : str
-        Path to model or directory of model parameters and shuffled trial
-        labels. ablate() is applied to all models in the directory. Shuffled
-        trial labels are assumed to be in the same directory as the model(s).
+        Path to parent directory for this analysis. Models and targets will
+        be in params_path/models_and_targets; unit activations and standard
+        deviations will be saved to params_path/activations; analysis
+        results will be saved to params_path/ablation_data.
     ablation_data : dictionary
         A dictionary in which keys = variables (e.g. accuracy, shuffle
         condition) and values are lists of data point values for that
@@ -289,7 +291,7 @@ def ablation_test(model, data_loader, criterion, params_path,
         elif ablation_type.lower() == 'noise':
             if ablation_steps is None:
                 ablation_steps = 20
-            ablation_test_counts = np.logspace(
+            ablation_test_counts = torch.logspace(
                 noise_scale[0], noise_scale[1], ablation_steps)
         # Create values for ablation_curves
         shuffle_fraction = \
@@ -343,12 +345,18 @@ def ablation_test(model, data_loader, criterion, params_path,
                 activation_data_path = params_directory_path + \
                                     unit_data_filename + 'activations.pt'
                 unit_sd_data_path = params_directory_path + \
-                                    unit_data_filename + 'std.pt'
+                                    unit_data_filename + 'sd.pt'
                 if os.path.exists(unit_sd_data_path):
                     model.sd = torch.load(unit_sd_data_path)
                 else:
                     loss, accuracy = [], []
                     model.store_activations = True
+                    if model.sd_scale and model.store_activations:
+                        warnings.warn('Unit activations are being stored '
+                                      'while noise is being injected. Set '
+                                      'model.sd_scale to zero to avoid '
+                                      'storing noise-injected unit '
+                                      'activations.')
                     # Test on full training data
                     test(model, data_loader, criterion, loss, accuracy,
                          device=device)
@@ -357,109 +365,134 @@ def ablation_test(model, data_loader, criterion, params_path,
                     # Save activation data
                     torch.save(model.activations, activation_data_path)
                     # Compute standard deviations
-                    model.std = model.activations.std(1)
+                    model.sd = model.activations.std(1)
                     # Save standard deviations of activations
                     torch.save(model.sd, unit_sd_data_path)
-
+                    model.store_activations = False
+                    model.activations = [[], []]
+                # Loop through scales of noise
+                for current_noise_scale in ablation_test_counts:
+                    model.sd_scale = current_noise_scale
+                    loss, accuracy = [], []
+                    print('Noise scale: ' + str(current_noise_scale))
+                    # Test
+                    test(model, data_loader, criterion, loss,
+                         accuracy, data_fraction=data_fraction,
+                         device=device)
+                    # Add values to ablation_data
+                    ablation_data[shuff_key].append(
+                        shuffle_fraction)
+                    ablation_data[loss_key].append(loss[0])
+                    ablation_data[accuracy_key].append(accuracy[0].item())
+                    ablation_data[n_units_ablated_key].append(
+                        current_noise_scale.item())
+                    ablation_data[dropout_key].append(dropout_fraction)
+                    ablation_data[rep_key].append(rep_n)
+                    # Print accuracy
+                    print('Accuracy: ' + str(accuracy[0].item()))
+                    # Reset noise scaling to 0
+                    model.sd_scale = 0
                 # Loop through ablation_test_counts, adding scaled noise
     return ablation_data
 
-def run_analyses(
-        model_and_output_directory='./models_and_output/',
-        training_data_directory='./data',
-        device='cpu',
-        data_fraction=1,
-        ablation_steps=None):
-    """Function for running analyses on MNIST MLPs
-
-    Parameters
-    ----------
-    model_and_output_directory : str
-        Path to base directory that contains models and stores data from
-        analyses
-    training_data_directory : str
-        Path to base directory that contains data sets (e.g. MNIST)
-    device : str
-        Device that models will be deployed to (cpu, gpu, etc)
-    data_fraction : float, (0, 1]
-        Fraction of data that will be used for testing. Use less to save on
-        time/computation. Default = 1.
-    ablation_steps : int
-        If a unit has n ablatable units, units will be ablated in
-        ablation_steps evenly spaced steps over the interval 1 to n. Use a
-        smaller number to save on time/computation. Default step size is 1.
-
-    Returns
-    -------
-    ablation_data : pandas DataFrame
-        Contains results from ablation analysis
-    """
-
-    mlp_data_path = model_and_output_directory + 'mnist_mlp/'
-
-    # MLP Parameters
-    input_size = 28 * 28
-    output_size = 10
-    n_units_per_layer = {
-        'selectivity': 128,
-        'generalization': 512,
-        'early_stopping': 2048,
-        'dropout': 2048
-    }
-
-    # Loss function
-    criterion = nn.CrossEntropyLoss()
-
-    # Download and load MNIST data
-    mnist_train_data = datasets.MNIST(
-        training_data_directory,
-        train=True,
-        download=True,
-        transform=transforms.ToTensor())
-    mnist_train_loader = torch.utils.data.DataLoader(
-        dataset=mnist_train_data, shuffle=True)
-    mnist_test_data = datasets.MNIST(
-        training_data_directory,
-        train=False,
-        download=True,
-        transform=transforms.ToTensor())
-    mnist_test_loader = torch.utils.data.DataLoader(
-        dataset=mnist_test_data, shuffle=True)
-
-    # Compute activations for each example
-
-    # Generalization analysis
-    mlp = MLP(input_size, n_units_per_layer['generalization'], output_size)
-    mlp_generalization_path = mlp_data_path \
-                                           + 'generalization/'
-    ablation_layers = [
-        ['linears.0.weight', 'linears.0.bias'],
-        ['linears.1.weight', 'linears.1.bias']
-    ]
-
-    # ablation_data = ablation_test(
-    #     mlp, mnist_train_loader, criterion,
-    #     mlp_generalization_path, device=device,
-    #     data_fraction=data_fraction, ablation_steps=ablation_steps,
-    #     n_repetitions=10)
-    # ablation_data = pd.DataFrame(ablation_data)
-    # data_save_path = model_and_output_directory + \
-    #                  'mnist_mlp_generalization_ablation.pkl'
-    # ablation_data.to_pickle(data_save_path)
-
-    ablation_data = ablation_test(
-        mlp, mnist_train_loader, criterion,
-        mlp_generalization_path, device=device,
-        data_fraction=data_fraction, ablation_steps=ablation_steps,
-        n_repetitions=10, ablation_type='noise')
-    ablation_data = pd.DataFrame(ablation_data)
-    data_save_path = model_and_output_directory + \
-                     'mnist_mlp_generalization_noise.pkl'
-    ablation_data.to_pickle(data_save_path)
-    # sns.set()
-    # plt.figure()
-    # sns.lineplot(x='units ablated', y='accuracy',
-    #              hue='fraction of labels corrupted', data=ablation_data,
-    #              palette=sns.color_palette('Blues_d'))
-
-
+# def run_analyses(
+#         model_and_output_directory='./models_and_output/',
+#         training_data_directory='./data',
+#         device='cpu',
+#         data_fraction=1,
+#         ablation_steps=None):
+#     """Function for running analyses on MNIST MLPs
+#
+#     Parameters
+#     ----------
+#     model_and_output_directory : str
+#         Path to base directory that contains models and stores data from
+#         analyses
+#     training_data_directory : str
+#         Path to base directory that contains data sets (e.g. MNIST)
+#     device : str
+#         Device that models will be deployed to (cpu, gpu, etc)
+#     data_fraction : float, (0, 1]
+#         Fraction of data that will be used for testing. Use less to save on
+#         time/computation. Default = 1.
+#     ablation_steps : int
+#         If a unit has n ablatable units, units will be ablated in
+#         ablation_steps evenly spaced steps over the interval 1 to n. Use a
+#         smaller number to save on time/computation. Default step size is 1.
+#
+#     Returns
+#     -------
+#     ablation_data : pandas DataFrame
+#         Contains results from ablation analysis
+#     """
+#
+#     mlp_data_path = model_and_output_directory + 'mnist_mlp/'
+#
+#     # MLP Parameters
+#     input_size = 28 * 28
+#     output_size = 10
+#     n_units_per_layer = {
+#         'selectivity': 128,
+#         'generalization': 512,
+#         'early_stopping': 2048,
+#         'dropout': 2048
+#     }
+#
+#     # Loss function
+#     criterion = nn.CrossEntropyLoss()
+#
+#     # Download and load MNIST data
+#     mnist_train_data = datasets.MNIST(
+#         training_data_directory,
+#         train=True,
+#         download=True,
+#         transform=transforms.ToTensor())
+#     mnist_train_loader = torch.utils.data.DataLoader(
+#         dataset=mnist_train_data, shuffle=True)
+#     mnist_test_data = datasets.MNIST(
+#         training_data_directory,
+#         train=False,
+#         download=True,
+#         transform=transforms.ToTensor())
+#     mnist_test_loader = torch.utils.data.DataLoader(
+#         dataset=mnist_test_data, shuffle=True)
+#
+#     # Compute activations for each example
+#
+#     # Generalization analysis
+#     mlp = MLP(input_size, n_units_per_layer['generalization'], output_size)
+#     mlp_generalization_path = mlp_data_path \
+#                                            + 'generalization/'
+#     ablation_layers = [
+#         ['linears.0.weight', 'linears.0.bias'],
+#         ['linears.1.weight', 'linears.1.bias']
+#     ]
+#
+#     # ablation_data = ablation_test(
+#     #     mlp, mnist_train_loader, criterion,
+#     #     mlp_generalization_path, device=device,
+#     #     data_fraction=data_fraction, ablation_steps=ablation_steps,
+#     #     n_repetitions=10)
+#     # ablation_data = pd.DataFrame(ablation_data)
+#     # data_save_path = mlp_generalization_path + \
+#     #                  'mnist_mlp_generalization_ablation.pkl'
+#     # ablation_data.to_pickle(data_save_path)
+#
+#     ablation_data = ablation_test(
+#         mlp, mnist_train_loader, criterion,
+#         mlp_generalization_path, device=device,
+#         data_fraction=data_fraction, ablation_steps=ablation_steps,
+#         n_repetitions=5, ablation_type='noise', noise_scale=[-1.5, 1])
+#
+#     ablation_data = pd.DataFrame(ablation_data)
+#     data_save_path = mlp_generalization_path + \
+#                      'mnist_mlp_generalization_noise.pkl'
+#     ablation_data.to_pickle(data_save_path)
+#     sns.set()
+#     plt.figure()
+#     noise_injection_ax =  sns.lineplot(x='scale of per-unit noise',
+#                                        y='accuracy', hue='fraction of '
+#                                                           'labels corrupted',
+#                                        data=ablation_data,
+#                                        palette=sns.color_palette('Blues_d'))
+#     noise_injection_ax.set(xscale='log')
