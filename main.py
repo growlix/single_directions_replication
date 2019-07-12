@@ -70,12 +70,13 @@ ablation_layers = [
 
 mlp_generalization_path = mlp_data_path \
                           + 'generalization/'
-mlp_generalization_data_path = mlp_generalization_path + 'ablation_data'
+mlp_generalization_data_path = mlp_generalization_path + 'ablation_data/'
 mlp_generalization_data_pickle_root = 'mnist_mlp_generalization_'
 
 # Ablation analysis
-mlp_generalization_ablation_data_path = mlp_generalization_data_pickle_root + \
-                                   'ablation.pkl'
+mlp_generalization_ablation_data_path = mlp_generalization_data_path \
+                                        + mlp_generalization_data_pickle_root \
+                                        + 'ablation.pkl'
 # If data exist, load them. Otherwise run the analyses
 if os.path.exists(mlp_generalization_ablation_data_path):
     mlp_ablation_data = pd.read_pickle(mlp_generalization_ablation_data_path)
@@ -90,8 +91,9 @@ else:
     mlp_ablation_data.to_pickle(mlp_generalization_ablation_data_path)
 
 # Noise injection analysis
-mlp_generalization_noise_data_path = mlp_generalization_data_pickle_root + \
-                                   'noise.pkl'
+mlp_generalization_noise_data_path = mlp_generalization_data_path \
+                                     + mlp_generalization_data_pickle_root \
+                                     + 'noise.pkl'
 # Logarithmic range over which noise should be scaled (10^x : 10^y)
 noise_range = [-1.5, 1]
 # If data exist, load them. Otherwise run the analyses
