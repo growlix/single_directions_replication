@@ -97,7 +97,7 @@ mlp_generalization_noise_data_path = mlp_generalization_data_path \
 # Logarithmic range over which noise should be scaled (10^x : 10^y)
 noise_range = [-1.5, 1]
 # If data exist, load them. Otherwise run the analyses
-if os.path.exists(mlp_generalization_noise_data_path):
+if os.path.exists(mlp_generalization_noise_data_path) and False:
     mlp_noise_data = pd.read_pickle(mlp_generalization_noise_data_path)
 else:
     # Run ablation analysis
@@ -109,3 +109,4 @@ else:
         noise_scale=noise_range)
     # Save data
     mlp_noise_data.to_pickle(mlp_generalization_noise_data_path)
+

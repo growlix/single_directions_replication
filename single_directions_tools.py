@@ -234,6 +234,9 @@ def ablation_test(model, data_loader, criterion, params_path,
     -------
     ablation_data
     """
+    # Paths
+    path_models_and_targets = params_path + 'models_and_targets/'
+    path_activations = params_path + 'activations/'
     # Keys/variables for ablation_data
     shuff_key = 'fraction of labels corrupted'
     loss_key = 'loss'
@@ -250,35 +253,19 @@ def ablation_test(model, data_loader, criterion, params_path,
         for key in ablation_data_keys:
             ablation_data[key] = []
 
-    # Check if model_path is a directory. If so, loop through each model
-    # file in the directory and call ablate() recursively.
-    if os.path.isdir(params_path):
         # List of models in directory
-        files = [f for f in os.listdir(params_path) \
-                 if os.path.isfile(os.path.join(params_path, f)) \
-                 and 'model' in f]
-        for model_name in files:
-            print('Analyzing file: ' + model_name)
-            ablation_test(model, data_loader, criterion, params_path +
-                          model_name, ablation_data=ablation_data,
-                          device=device, data_fraction=data_fraction,
-                          n_repetitions=n_repetitions,
-                          ablation_steps=ablation_steps,
-                          ablation_type=ablation_type, noise_scale=noise_scale)
-        ablation_data
-    else:
-        # Path of directory containing saved model parameters
-        params_directory_path = params_path[0: params_path.rfind('/') + 1]
-        # Filename of current model parameters
-        params_filename = params_path[params_path.rfind('/') + 1:]
+    files = [f for f in os.listdir(path_models_and_targets) \
+            if os.path.isfile(os.path.join(path_models_and_targets, f)) \
+            and 'model' in f]
+    # Loop through and analyze each model file
+    for model_name in files:
+        print('Analyzing file: ' + model_name)
         # Shuffled labels. Find file with matching model parameter file
         # name substring
-        shuffled_targets_filename = \
-            params_filename[0: params_filename.find('epochs')] \
-            + 'targets.pt'
+        path_shuffled_targets_file = path_models_and_targets \
+            + model_name[0: model_name.find('epochs')] + 'targets.pt'
         # Load shuffled labels
-        data_loader.dataset.targets = torch.load(
-            params_directory_path + shuffled_targets_filename)
+        data_loader.dataset.targets = torch.load(path_shuffled_targets_file)
         n_units = len(model.ablation_list)
         # If ablating to zero
         if ablation_type.lower() == 'zero':
@@ -295,17 +282,18 @@ def ablation_test(model, data_loader, criterion, params_path,
                 noise_scale[0], noise_scale[1], ablation_steps)
         # Create values for ablation_curves
         shuffle_fraction = \
-            float(params_filename[params_filename.find('shuff') + 5:
-                                  params_filename.find('shuff') + 8])
+            float(model_name[model_name.find('shuff') + 5:
+                                  model_name.find('shuff') + 8])
         dropout_fraction = \
-            float(params_filename[params_filename.find('dropout') + 7:
-                                  params_filename.find('dropout') + 10])
+            float(model_name[model_name.find('dropout') + 7:
+                                  model_name.find('dropout') + 10])
         # Repeat ablation process for repetitions
         for rep_n in range(n_repetitions):
             # Load Model
-            model.load_state_dict(torch.load(params_path, map_location=device))
-            print('Repetition ' + str(rep_n + 1) + ' out of ' + str(
-                n_repetitions))
+            model.load_state_dict(torch.load(path_models_and_targets +
+                                             model_name, map_location=device))
+            print('Repetition ' + str(rep_n + 1) + ' out of ' \
+                  + str(n_repetitions))
             # If we are zeroing
             if ablation_type.lower() == 'zero':
                 # Flag to continue ablating
@@ -341,13 +329,13 @@ def ablation_test(model, data_loader, criterion, params_path,
                 # activation across the training data. If file doesn't
                 # exist, obtain data and create it.
                 unit_data_filename = \
-                    params_filename[0: params_filename.find('epochs')]
-                activation_data_path = params_directory_path + \
+                    model_name[0: model_name.find('epochs')]
+                path_activation_data = path_activations + \
                                     unit_data_filename + 'activations.pt'
-                unit_sd_data_path = params_directory_path + \
+                path_unit_sd_data = path_activations + \
                                     unit_data_filename + 'sd.pt'
-                if os.path.exists(unit_sd_data_path):
-                    model.sd = torch.load(unit_sd_data_path)
+                if os.path.exists(path_unit_sd_data):
+                    model.sd = torch.load(path_unit_sd_data)
                 else:
                     loss, accuracy = [], []
                     model.store_activations = True
@@ -363,11 +351,11 @@ def ablation_test(model, data_loader, criterion, params_path,
                     # Convert activation data to tensor
                     model.activations = torch.tensor(model.activations)
                     # Save activation data
-                    torch.save(model.activations, activation_data_path)
+                    torch.save(model.activations, path_activation_data)
                     # Compute standard deviations
                     model.sd = model.activations.std(1)
                     # Save standard deviations of activations
-                    torch.save(model.sd, unit_sd_data_path)
+                    torch.save(model.sd, path_unit_sd_data)
                     model.store_activations = False
                     model.activations = [[], []]
                 # Loop through scales of noise
