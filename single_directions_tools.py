@@ -2,6 +2,7 @@ import os
 import itertools
 import time
 import warnings
+import math
 
 import torch
 import torch.nn as nn
@@ -11,122 +12,6 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
-
-
-class MLP(nn.Module):
-    """Two-layer MLP
-
-    Class for creating two-layer MLP for the MNIST. Output is softmax across
-    10 classes. It is assumed that the network will only be ever used in eval()
-    mode, and thus dropout layers will be ignored.
-
-    Parameters
-    ----------
-
-    input_size : int
-        Size of input
-    n_units_per_layer : int
-        Number of units per layer
-    output_size : int
-        Number of outputs
-
-    """
-
-    def __init__(self, input_size, n_units_per_layer, output_size):
-        super(MLP, self).__init__()
-        # Set layer parameters
-        self.input_size = input_size
-        # Linear transformation: out = input x A' + b
-        self.linears = nn.ModuleList(
-            [nn.Linear(input_size, n_units_per_layer)])
-        self.linears.append(nn.Linear(n_units_per_layer, n_units_per_layer))
-        self.linears.append(nn.Linear(n_units_per_layer, output_size))
-        # List of units stored as pairs of integers
-        self.unit_list = list(itertools.product(
-            [0, 1], list(range(n_units_per_layer))))
-        # Initialize list of units to ablate
-        self.ablate(init=True)
-        # Stores activations
-        self.activations = [[], []]
-        # Flag to store activations
-        self.store_activations = False
-        # Holds standard deviations of activations across entire training
-        # set for each unit. Used when injecting noise. Each entry is an n
-        # x 1 list of variances, in which n = number of units.
-        self.sd = []
-        # Scales noise injection
-        self.sd_scale = 0
-
-        # Define forward pass
-    def forward(self, x):
-        # Reshape input image into 1 x n row vector
-        x = x.view(-1, self.input_size)
-        # First layer
-        # Rectified linear unit (ReLU) activation
-        x = F.relu(self.linears[0](x))
-        # If injecting noise
-        if self.sd_scale:
-            x = x + torch.from_numpy(np.random.normal(0, self.sd[0])).float() \
-                * self.sd_scale
-        # If saving activations
-        if self.store_activations:
-            self.activations[0].append(x.squeeze().tolist())
-        # Second layer
-        x = F.relu(self.linears[1](x))
-        if self.sd_scale:
-            x = x + torch.from_numpy(np.random.normal(0, self.sd[1])).float() \
-                * self.sd_scale
-        if self.store_activations:
-            self.activations[1].append(x.squeeze().tolist())
-        # Softmax on output layer
-        return F.log_softmax(self.linears[2](x), dim=1)
-
-    def ablate(self, init=False, layer=None, unit=None):
-        """Method to ablate a unit.
-
-        Units are ablated in random order from a specified set of layers.
-        Ablation is achieved by setting a unit's input weights and bias to
-        zero. If values aren't passed, will pop value from
-        self.ablation_list and return true. If ablation_list is empty,
-        will return false and re-initialize ablation_list.
-
-        Parameters
-        ----------
-        init : boolean
-            If True, will initialize self.ablation_list with a random
-            ordering of candidate units.
-        layer : int
-            layer number. If not provided, will pop first value pair in
-            self.ablation_list.
-        unit : int
-            unit number. If not provided, will pop first value pair in
-            self.ablation_list.
-
-        Returns
-        -------
-        boolean
-            False if ablation_list is empty, True if ablation_list is not empty
-        """
-        if init:
-            self.ablation_list = list(np.random.permutation(self.unit_list))
-        else:
-            # If layer or unit aren't provided, use ablation_list
-            if layer is None or unit is None:
-                # If ablation_list isn't empty, pop value and return True
-                if self.ablation_list:
-                    unit = self.ablation_list.pop()
-                    layer, unit = unit[0], unit[1]
-                    self.linears[layer].weight[unit] = 0
-                    self.linears[layer].bias[unit] = 0
-                    return True
-                # If ablation_list is empty, re-initialize it and return False
-                else:
-                    self.ablate(init=True)
-                    return False
-            else:
-                self.linears[layer].weight[unit] = 0
-                self.linears[layer].bias[unit] = 0
-
 
 def test(model, data_loader, criterion, loss_vector, accuracy_vector,
          data_fraction=1, device='cpu'):
@@ -383,104 +268,16 @@ def ablation_test(model, data_loader, criterion, params_path,
                 # Loop through ablation_test_counts, adding scaled noise
     return ablation_data
 
-# def run_analyses(
-#         model_and_output_directory='./models_and_output/',
-#         training_data_directory='./data',
-#         device='cpu',
-#         data_fraction=1,
-#         ablation_steps=None):
-#     """Function for running analyses on MNIST MLPs
-#
-#     Parameters
-#     ----------
-#     model_and_output_directory : str
-#         Path to base directory that contains models and stores data from
-#         analyses
-#     training_data_directory : str
-#         Path to base directory that contains data sets (e.g. MNIST)
-#     device : str
-#         Device that models will be deployed to (cpu, gpu, etc)
-#     data_fraction : float, (0, 1]
-#         Fraction of data that will be used for testing. Use less to save on
-#         time/computation. Default = 1.
-#     ablation_steps : int
-#         If a unit has n ablatable units, units will be ablated in
-#         ablation_steps evenly spaced steps over the interval 1 to n. Use a
-#         smaller number to save on time/computation. Default step size is 1.
-#
-#     Returns
-#     -------
-#     ablation_data : pandas DataFrame
-#         Contains results from ablation analysis
-#     """
-#
-#     mlp_data_path = model_and_output_directory + 'mnist_mlp/'
-#
-#     # MLP Parameters
-#     input_size = 28 * 28
-#     output_size = 10
-#     n_units_per_layer = {
-#         'selectivity': 128,
-#         'generalization': 512,
-#         'early_stopping': 2048,
-#         'dropout': 2048
-#     }
-#
-#     # Loss function
-#     criterion = nn.CrossEntropyLoss()
-#
-#     # Download and load MNIST data
-#     mnist_train_data = datasets.MNIST(
-#         training_data_directory,
-#         train=True,
-#         download=True,
-#         transform=transforms.ToTensor())
-#     mnist_train_loader = torch.utils.data.DataLoader(
-#         dataset=mnist_train_data, shuffle=True)
-#     mnist_test_data = datasets.MNIST(
-#         training_data_directory,
-#         train=False,
-#         download=True,
-#         transform=transforms.ToTensor())
-#     mnist_test_loader = torch.utils.data.DataLoader(
-#         dataset=mnist_test_data, shuffle=True)
-#
-#     # Compute activations for each example
-#
-#     # Generalization analysis
-#     mlp = MLP(input_size, n_units_per_layer['generalization'], output_size)
-#     mlp_generalization_path = mlp_data_path \
-#                                            + 'generalization/'
-#     ablation_layers = [
-#         ['linears.0.weight', 'linears.0.bias'],
-#         ['linears.1.weight', 'linears.1.bias']
-#     ]
-#
-#     # ablation_data = ablation_test(
-#     #     mlp, mnist_train_loader, criterion,
-#     #     mlp_generalization_path, device=device,
-#     #     data_fraction=data_fraction, ablation_steps=ablation_steps,
-#     #     n_repetitions=10)
-#     # ablation_data = pd.DataFrame(ablation_data)
-#     # data_save_path = mlp_generalization_path + \
-#     #                  'mnist_mlp_generalization_ablation.pkl'
-#     # ablation_data.to_pickle(data_save_path)
-#
-#     ablation_data = ablation_test(
-#         mlp, mnist_train_loader, criterion,
-#         mlp_generalization_path, device=device,
-#         data_fraction=data_fraction, ablation_steps=ablation_steps,
-#         n_repetitions=5, ablation_type='noise', noise_scale=[-1.5, 1])
-#
-#     ablation_data = pd.DataFrame(ablation_data)
-#     data_save_path = mlp_generalization_path + \
-#                      'mnist_mlp_generalization_noise.pkl'
-#     ablation_data.to_pickle(data_save_path)
-#     sns.set()
-#     plt.figure()
-#     noise_injection_ax =  sns.lineplot(x='scale of per-unit noise',
-#                                        y='accuracy', hue='fraction of '
-#                                                           'labels corrupted',
-#                                        data=ablation_data,
-#                                        palette=sns.color_palette('Blues_d'))
-#     noise_injection_ax.set(xscale='log')
+def conv_output_shape(h_w, kernel_size=1, stride=1, pad=0, dilation=1):
+    """
+    Utility function for computing output of convolutions
+    takes a tuple of (h,w) and returns a tuple of (h,w)
+    From: discuss.pytorch.org/t/utility-function-for-calculating-the-shape-of-a-conv-output/11173/4
+    """
+    if type(kernel_size) is not tuple:
+        kernel_size = (kernel_size, kernel_size)
+    h = math.floor( ((h_w[0] + (2 * pad) - ( dilation * (kernel_size[0] - 1)
+                                             ) - 1 )/ stride) + 1)
+    w = math.floor( ((h_w[1] + (2 * pad) - ( dilation * (kernel_size[1] - 1)
+                                             ) - 1 )/ stride) + 1)
+    return h, w
